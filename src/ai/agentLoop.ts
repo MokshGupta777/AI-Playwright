@@ -1,9 +1,28 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 export type TranscriptEntry = { role: 'assistant' | 'tool'; content: string };
+
+/** Retries a Gemini call on transient overload (503) with exponential backoff. */
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const message = err instanceof Error ? err.message : String(err);
+      const isOverloaded = /503|overloaded|high demand|UNAVAILABLE/i.test(message);
+      if (!isOverloaded || attempt === maxAttempts) throw err;
+      const delayMs = 1000 * 2 ** (attempt - 1); // 1s, 2s, 4s, ...
+      console.warn(`Gemini overloaded (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
 
 function getClient(): GoogleGenerativeAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -39,6 +58,15 @@ function mapSchemaType(t: unknown): SchemaType {
 function sanitizeSchema(schema: any): any {
   if (!schema || typeof schema !== 'object') {
     return { type: SchemaType.OBJECT, properties: {} };
+  }
+
+  // MCP tool schemas sometimes express optional/nullable params as
+  // anyOf/oneOf (e.g. [{type: "string"}, {type: "null"}]). Gemini's schema
+  // has no union type, so collapse to the first non-null variant.
+  if (Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf)) {
+    const variants: any[] = schema.anyOf ?? schema.oneOf;
+    const chosen = variants.find((v) => v?.type !== 'null') ?? variants[0] ?? { type: 'string' };
+    return sanitizeSchema({ ...chosen, description: schema.description ?? chosen.description });
   }
 
   const out: any = { type: mapSchemaType(schema.type) };
@@ -114,7 +142,7 @@ export async function runAgentLoop(params: {
   while (turns < maxTurns) {
     turns++;
 
-    const result = await chat.sendMessage(nextMessage as any);
+    const result = await withRetry(() => chat.sendMessage(nextMessage as any));
     const response = result.response;
     const text = response.text();
     if (text && text.trim()) transcript.push({ role: 'assistant', content: text });
