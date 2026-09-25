@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { createBrowserMcpClient } from './mcpBrowserClient';
 import { runAgentLoop, TranscriptEntry } from './agentLoop';
 import { env } from '../config/env';
@@ -21,8 +20,6 @@ export interface AiTestResult {
   transcript: TranscriptEntry[];
   reason: string;
 }
-
-const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from env
 
 function buildSystemPrompt(spec: AiTestSpec): string {
   return `You are a QA automation agent. You drive a REAL web browser exclusively through the tools you were given (Playwright MCP). You have no other way to interact with the page.
@@ -58,7 +55,6 @@ export async function runAiTest(spec: AiTestSpec): Promise<AiTestResult> {
 
   try {
     const { finalText, turns, transcript } = await runAgentLoop({
-      anthropic,
       mcpClient,
       systemPrompt: buildSystemPrompt(spec),
       firstUserMessage: 'Begin the test now.',

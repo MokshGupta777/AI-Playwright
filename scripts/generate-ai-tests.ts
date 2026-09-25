@@ -1,12 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import Anthropic from '@anthropic-ai/sdk';
 import { createBrowserMcpClient } from '../src/ai/mcpBrowserClient';
 import { runAgentLoop } from '../src/ai/agentLoop';
 import { env } from '../src/config/env';
 
 const SPECS_DIR = path.join(__dirname, '..', 'tests', 'ai', 'specs');
-const anthropic = new Anthropic();
 
 function listExistingTestTitles(): string[] {
   if (!fs.existsSync(SPECS_DIR)) return [];
@@ -42,19 +40,18 @@ When you have finished exploring, respond with ONLY a raw JSON array (no markdow
 Base every proposal on something you actually observed in the browser during this session.`;
 
     const { finalText, turns } = await runAgentLoop({
-      anthropic,
       mcpClient,
       systemPrompt,
       firstUserMessage: 'Begin exploring now.',
       maxTurns: 25,
-      maxTokens: 2048,
     });
 
     console.log(`Exploration finished after ${turns} turn(s).`);
 
     let proposals: Array<{ id: string; title: string; steps: string[]; successCriteria: string }>;
     try {
-      proposals = JSON.parse(finalText.trim());
+      const cleaned = finalText.trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim();
+      proposals = JSON.parse(cleaned);
     } catch {
       console.error('Could not parse the agent\'s final response as a JSON array:\n', finalText);
       process.exitCode = 1;

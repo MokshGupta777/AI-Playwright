@@ -1,98 +1,150 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-export const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 export type TranscriptEntry = { role: 'assistant' | 'tool'; content: string };
 
-/** Converts MCP tool definitions into the shape the Anthropic Messages API expects. */
-export function mcpToolsToAnthropicTools(mcpTools: { name: string; description?: string; inputSchema?: unknown }[]) {
+function getClient(): GoogleGenerativeAI {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
+  return new GoogleGenerativeAI(apiKey);
+}
+
+/** Maps a JSON-Schema type string (as MCP tools describe their inputs) to Gemini's SchemaType enum. */
+function mapSchemaType(t: unknown): SchemaType {
+  switch (String(t).toLowerCase()) {
+    case 'string':
+      return SchemaType.STRING;
+    case 'number':
+      return SchemaType.NUMBER;
+    case 'integer':
+      return SchemaType.INTEGER;
+    case 'boolean':
+      return SchemaType.BOOLEAN;
+    case 'array':
+      return SchemaType.ARRAY;
+    case 'object':
+    default:
+      return SchemaType.OBJECT;
+  }
+}
+
+/**
+ * Gemini's function-declaration schema only understands a subset of JSON
+ * Schema (no `$schema`, `additionalProperties`, etc), and wants its own
+ * SchemaType enum values instead of raw strings — so MCP tool schemas need
+ * translating rather than passing through as-is.
+ */
+function sanitizeSchema(schema: any): any {
+  if (!schema || typeof schema !== 'object') {
+    return { type: SchemaType.OBJECT, properties: {} };
+  }
+
+  const out: any = { type: mapSchemaType(schema.type) };
+  if (schema.description) out.description = schema.description;
+  if (Array.isArray(schema.enum)) out.enum = schema.enum;
+
+  if (out.type === SchemaType.OBJECT) {
+    const props = schema.properties ?? {};
+    out.properties = Object.fromEntries(
+      Object.keys(props).map((key) => [key, sanitizeSchema(props[key])]),
+    );
+    if (Array.isArray(schema.required) && schema.required.length > 0) {
+      out.required = schema.required;
+    }
+  }
+
+  if (out.type === SchemaType.ARRAY) {
+    out.items = sanitizeSchema(schema.items ?? { type: 'string' });
+  }
+
+  return out;
+}
+
+function mcpToolsToGeminiFunctionDeclarations(
+  mcpTools: { name: string; description?: string; inputSchema?: unknown }[],
+) {
   return mcpTools.map((t) => ({
     name: t.name,
     description: t.description ?? '',
-    input_schema: (t.inputSchema as Anthropic.Tool['input_schema']) ?? { type: 'object', properties: {} },
+    parameters: sanitizeSchema(t.inputSchema ?? { type: 'object', properties: {} }),
   }));
 }
 
 function stringifyToolContent(content: unknown): string {
   if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (c?.type === 'text' ? c.text : JSON.stringify(c)))
-      .join('\n');
+    return content.map((c: any) => (c?.type === 'text' ? c.text : JSON.stringify(c))).join('\n');
   }
   return typeof content === 'string' ? content : JSON.stringify(content);
 }
 
 /**
- * Runs the standard Claude <-> MCP tool-use loop until the model stops
- * calling tools (i.e. it has a final text answer) or `maxTurns` is hit.
- *
- * Every actual browser action goes through `mcpClient.callTool`, so the
- * transcript is a real record of what happened in the browser, not just
- * what the model claims happened.
+ * Runs the Gemini <-> MCP function-calling loop until the model responds
+ * with plain text (no function calls) or `maxTurns` is hit. Every browser
+ * action goes through `mcpClient.callTool`, so the transcript reflects what
+ * actually happened in the browser, not just what the model claims.
  */
 export async function runAgentLoop(params: {
-  anthropic: Anthropic;
   mcpClient: Client;
   systemPrompt: string;
   firstUserMessage: string;
   maxTurns: number;
-  maxTokens?: number;
 }): Promise<{ finalText: string; turns: number; transcript: TranscriptEntry[] }> {
-  const { anthropic, mcpClient, systemPrompt, firstUserMessage, maxTurns, maxTokens = 1536 } = params;
+  const { mcpClient, systemPrompt, firstUserMessage, maxTurns } = params;
 
   const { tools: mcpTools } = await mcpClient.listTools();
-  const tools = mcpToolsToAnthropicTools(mcpTools);
+  const functionDeclarations = mcpToolsToGeminiFunctionDeclarations(mcpTools);
 
-  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: firstUserMessage }];
+  const genAI = getClient();
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    systemInstruction: systemPrompt,
+    tools: [{ functionDeclarations }],
+  });
+
+  const chat = model.startChat();
   const transcript: TranscriptEntry[] = [];
 
   let turns = 0;
   let finalText = '';
+  let nextMessage: string | Array<{ functionResponse: { name: string; response: Record<string, unknown> } }> =
+    firstUserMessage;
 
   while (turns < maxTurns) {
     turns++;
 
-    const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      tools,
-      messages,
-    });
+    const result = await chat.sendMessage(nextMessage as any);
+    const response = result.response;
+    const text = response.text();
+    if (text && text.trim()) transcript.push({ role: 'assistant', content: text });
 
-    messages.push({ role: 'assistant', content: response.content });
-
-    const toolUses = response.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
-    );
-    const textBlocks = response.content.filter(
-      (b): b is Anthropic.TextBlock => b.type === 'text',
-    );
-
-    for (const block of textBlocks) {
-      if (block.text.trim()) transcript.push({ role: 'assistant', content: block.text });
-    }
-
-    if (toolUses.length === 0) {
-      finalText = textBlocks.map((b) => b.text).join('\n');
+    const functionCalls = response.functionCalls() ?? [];
+    if (functionCalls.length === 0) {
+      finalText = text;
       break;
     }
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const use of toolUses) {
+    const functionResponseParts: Array<{ functionResponse: { name: string; response: Record<string, unknown> } }> = [];
+    for (const call of functionCalls) {
       try {
-        const result = await mcpClient.callTool({ name: use.name, arguments: use.input as Record<string, unknown> });
-        const content = stringifyToolContent(result.content);
-        transcript.push({ role: 'tool', content: `${use.name}(${JSON.stringify(use.input)}) -> ${content.slice(0, 800)}` });
-        toolResults.push({ type: 'tool_result', tool_use_id: use.id, content });
+        const toolResult = await mcpClient.callTool({
+          name: call.name,
+          arguments: (call.args ?? {}) as Record<string, unknown>,
+        });
+        const content = stringifyToolContent(toolResult.content);
+        transcript.push({
+          role: 'tool',
+          content: `${call.name}(${JSON.stringify(call.args)}) -> ${content.slice(0, 800)}`,
+        });
+        functionResponseParts.push({ functionResponse: { name: call.name, response: { result: content } } });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        transcript.push({ role: 'tool', content: `${use.name} -> ERROR: ${message}` });
-        toolResults.push({ type: 'tool_result', tool_use_id: use.id, content: `ERROR: ${message}`, is_error: true });
+        transcript.push({ role: 'tool', content: `${call.name} -> ERROR: ${message}` });
+        functionResponseParts.push({ functionResponse: { name: call.name, response: { error: message } } });
       }
     }
-    messages.push({ role: 'user', content: toolResults });
+    nextMessage = functionResponseParts;
   }
 
   return { finalText, turns, transcript };
