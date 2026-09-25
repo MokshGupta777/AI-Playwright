@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 export type TranscriptEntry = { role: 'assistant' | 'tool'; content: string };
 
