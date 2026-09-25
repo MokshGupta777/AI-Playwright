@@ -1,0 +1,56 @@
+name: AI Test Generation
+
+on:
+  schedule:
+    - cron: '0 4 * * 1' # weekly, Monday 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'What should the AI explore? (leave blank for "whole application")'
+        required: false
+        default: 'the whole application, focusing on the most important user flows'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Explore app and propose new AI test specs
+        run: npm run generate:ai-tests -- "${{ github.event.inputs.scope || 'the whole application, focusing on the most important user flows' }}"
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          API_URL: ${{ secrets.API_URL }}
+          USER_EMAIL: ${{ secrets.USER_EMAIL }}
+          USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Open PR with proposed specs
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore(ai-tests): AI-generated test case proposals'
+          title: 'AI-generated test case proposals'
+          body: |
+            The AI exploration agent crawled the app and proposed the attached
+            natural-language test specs (`tests/ai/specs/*.ai.json`).
+
+            **Review before relying on these** — the agent decides its own
+            actions, so verify each spec's steps and success criteria reflect
+            real, intended behavior before merging.
+          branch: ai/generated-tests
+          add-paths: tests/ai/specs/*.ai.json
