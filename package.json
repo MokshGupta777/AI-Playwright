@@ -1,0 +1,41 @@
+{
+  "name": "pw-project",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Playwright + TypeScript UI automation framework with layered architecture and GitHub Actions CI",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test tests/ui",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report",
+    "allure:generate": "allure-commandline generate ./allure-results --clean -o allure-report",
+    "allure:open": "allure-commandline open allure-report",
+    "test:ai": "tsx scripts/run-ai-tests.ts",
+    "generate:ai-tests": "tsx scripts/generate-ai-tests.ts"
+  },
+  "keywords": [
+    "playwright",
+    "typescript",
+    "qa",
+    "automation",
+    "clean-architecture"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.5.2",
+    "allure-commandline": "^2.38.1",
+    "allure-playwright": "^3.6.0",
+    "tsx": "^4.20.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@modelcontextprotocol/sdk": "^1.9.0",
+    "@playwright/mcp": "^0.0.29",
+    "dotenv": "^17.4.1"
+  }
+}

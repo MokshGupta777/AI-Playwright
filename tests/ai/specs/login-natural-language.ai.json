@@ -1,0 +1,12 @@
+{
+  "id": "login-natural-language",
+  "title": "Log in with valid credentials, described in plain English",
+  "steps": [
+    "Navigate to the login page",
+    "Enter the valid test user's email and password into the login form",
+    "Click the login button",
+    "Check whether the page now shows the user is logged in"
+  ],
+  "successCriteria": "After submitting valid credentials, the page displays a 'Logged in as' label.",
+  "maxTurns": 20
+}
